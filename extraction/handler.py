@@ -1,18 +1,19 @@
 import os
+import json
 import boto3
 import fitz  # PyMuPDF
 import pytesseract
 from pdf2image import convert_from_path
-from PIL import Image
 from io import BytesIO
 
 # Configurações
-S3_BUCKET = os.environ.get("S3_BUCKET")
+S3_INPUT_BUCKET = os.environ.get("S3_BUCKET")  # bucket de entrada
+S3_OUTPUT_BUCKET = "my-textract-output"        # bucket de saída
 s3_client = boto3.client("s3")
 
 def download_pdf_from_s3(key):
     """Baixa o PDF da S3 para memória"""
-    obj = s3_client.get_object(Bucket=S3_BUCKET, Key=key)
+    obj = s3_client.get_object(Bucket=S3_INPUT_BUCKET, Key=key)
     return BytesIO(obj['Body'].read())
 
 def extract_text_from_pdf(file_like):
@@ -38,21 +39,31 @@ def extract_text_from_pdf(file_like):
     except Exception as e:
         return f"Erro ao processar PDF: {str(e)}"
 
-def main():
-    # Lista arquivos PDF na bucket
-    response = s3_client.list_objects_v2(Bucket=S3_BUCKET)
+def save_text_to_s3(pdf_key, text):
+    """Salva o texto extraído em formato JSON na bucket de saída"""
+    json_key = f"{os.path.splitext(pdf_key)[0]}.json"
+    s3_client.put_object(
+        Bucket=S3_OUTPUT_BUCKET,
+        Key=json_key,
+        Body=json.dumps({"pdf": pdf_key, "text": text}),
+        ContentType="application/json"
+    )
+    return json_key
+
+def lambda_handler(event, context):
+    """Função Lambda principal"""
+    # Lista arquivos PDF na bucket de entrada
+    response = s3_client.list_objects_v2(Bucket=S3_INPUT_BUCKET)
     pdf_keys = [obj['Key'] for obj in response.get('Contents', []) if obj['Key'].lower().endswith(".pdf")]
 
     if not pdf_keys:
-        print("Nenhum PDF encontrado na S3.")
-        return
+        return {"statusCode": 200, "body": {"message": "Nenhum PDF encontrado na S3."}}
 
+    results = {}
     for key in pdf_keys:
-        print(f"\n=== PDF: {key} ===\n")
         pdf_file = download_pdf_from_s3(key)
         text = extract_text_from_pdf(pdf_file)
-        print(text[:1000])  # mostra os primeiros 1000 caracteres
-        print("="*80)
+        json_key = save_text_to_s3(key, text)  # salva todo o texto
+        results[key] = {"s3_json_key": json_key}
 
-if __name__ == "__main__":
-    main()
+    return {"statusCode": 200, "body": results}
